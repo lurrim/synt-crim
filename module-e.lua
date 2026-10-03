@@ -115,11 +115,14 @@ local list = {}
 local idxCounter = 0
 
 ------------------------------------------------------------------
--- Прокси-клон персонажа для "цвета за стеной".
--- Roblox рисует только один Highlight на один объект, поэтому второй Highlight
--- вешаем на невидимую копию персонажа, которая каждый кадр повторяет позы настоящего.
--- Настоящий персонаж: Highlight в режиме Occluded (цвет видимой части).
--- Копия: Highlight в режиме AlwaysOnTop (цвет того, что за стеной).
+-- Прокси-клон персонажа для "цвета за стеной" (occluded chams).
+--
+-- Принцип: Highlight, который находится позади другого ВИДИМОГО Highlight, не рисуется.
+--   * Настоящий персонаж: Highlight в режиме Occluded. Его видимая часть работает как МАСКА.
+--     Важно: маска должна реально рисоваться, поэтому прозрачность там не должна быть ровно 1
+--     (ниже в update она ограничена до 0.999, когда включён Hidden color).
+--   * Копия: Highlight в режиме AlwaysOnTop. Из-за маски он виден только за стеной.
+--   * Копия на 1% меньше оригинала, чтобы не было z-fighting.
 ------------------------------------------------------------------
 local function destroyProxy(e)
     if e.proxy then
@@ -149,6 +152,7 @@ local function buildProxy(e, char, cam)
                 c.CanTouch = false
                 c.Massless = true
                 c.Transparency = 0.999 -- не 1: Highlight не рисуется на полностью прозрачных частях
+                c.Size = c.Size * 0.99 -- чуть меньше оригинала, чтобы не было z-fighting с маской
                 c.Parent = model
                 src[#src + 1] = d
                 dst[#dst + 1] = c
@@ -351,7 +355,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         set(ch, "Enabled", on)
         set(ch, "FillColor", C.FillRGB)
         set(ch, "OutlineColor", C.OutlineRGB)
-        -- Hidden color включён: настоящий персонаж = только видимые части, копия = всё остальное
+        -- Hidden color включён: настоящий персонаж = только видимые части (маска), копия = всё остальное
         set(ch, "DepthMode", (hiddenOn or C.VisibleCheck) and OCCLUDED or ALWAYS)
 
         set(chh, "Enabled", synced)
@@ -360,20 +364,24 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
             set(chh, "OutlineColor", C.HiddenOutlineRGB)
         end
 
+        -- Настоящий Highlight должен РЕАЛЬНО рисоваться, иначе он не маскирует копию
+        -- (Highlight с прозрачностью ровно 1 не рисуется -> цвет за стеной заливает весь силуэт).
+        local capT = hiddenOn and 0.999 or 1
+
         if C.Thermal then
             if (frame + e.idx) % 3 == 0 then
                 local b = atan(sin(tickNow * 2)) * 2 / pi
-                local ft = C.Fill_Transparency * b * 0.01
-                local ot = C.Outline_Transparency * b * 0.01
-                ch.FillTransparency, ch.OutlineTransparency = ft, ot
+                local ft = max(0, C.Fill_Transparency * b * 0.01)
+                local ot = max(0, C.Outline_Transparency * b * 0.01)
+                ch.FillTransparency, ch.OutlineTransparency = min(ft, capT), min(ot, capT)
                 if synced then
                     chh.FillTransparency, chh.OutlineTransparency = ft, ot
                 end
             end
         else
             local ft, ot = C.Fill_Transparency * 0.01, C.Outline_Transparency * 0.01
-            set(ch, "FillTransparency", ft)
-            set(ch, "OutlineTransparency", ot)
+            set(ch, "FillTransparency", min(ft, capT))
+            set(ch, "OutlineTransparency", min(ot, capT))
             if synced then
                 set(chh, "FillTransparency", ft)
                 set(chh, "OutlineTransparency", ot)
