@@ -151,7 +151,7 @@ local function buildProxy(e, char, cam)
                 c.CanQuery = false
                 c.CanTouch = false
                 c.Massless = true
-                c.Transparency = 0.999 -- не 1: Highlight не рисуется на полностью прозрачных частях
+                c.Transparency = 0 -- не 1: Highlight не рисуется на полностью прозрачных частях
                 c.Size = c.Size * 0.99 -- чуть меньше оригинала, чтобы не было z-fighting с маской
                 c.Parent = model
                 src[#src + 1] = d
@@ -375,7 +375,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
                 local ot = max(0, C.Outline_Transparency * b * 0.01)
                 ch.FillTransparency, ch.OutlineTransparency = min(ft, capT), min(ot, capT)
                 if synced then
-                    chh.FillTransparency, chh.OutlineTransparency = ft, ot
+                    chh.FillTransparency, chh.OutlineTransparency = ft, 1
                 end
             end
         else
@@ -384,7 +384,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
             set(ch, "OutlineTransparency", min(ot, capT))
             if synced then
                 set(chh, "FillTransparency", ft)
-                set(chh, "OutlineTransparency", ot)
+                set(chh, "OutlineTransparency", 1)
             end
         end
     end
