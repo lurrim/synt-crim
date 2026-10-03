@@ -26,6 +26,9 @@ local ESP = {
             HiddenEnabled = false,
             HiddenFillRGB = Color3.fromRGB(255, 80, 80),
             HiddenOutlineRGB = Color3.fromRGB(255, 80, 80),
+            -- true = клон персонажа целиком вместе с Humanoid (экспериментально: ломает маску,
+            -- цвет "за стеной" заливает весь силуэт). false = сборка по частям (работает).
+            FullClone = false,
         },
         Names = { Enabled = true },
         Distances = { Enabled = true, Position = "Text" },
@@ -152,7 +155,6 @@ local PROXY_SCALE = 0.94
 
 -- Запасной вариант: сборка по частям без Humanoid (старый способ)
 local function buildProxyLegacy(e, char, cam)
-    warn("[ESP] proxy: legacy mode for " .. tostring(char and char.Name))
     if e.proxy then e.proxy:Destroy() end
 
     -- R6-бандлы: форму конечности задаёт CharacterMesh на персонаже, а не сама часть
@@ -230,6 +232,9 @@ local function indexTree(root, out)
 end
 
 local function buildProxy(e, char, cam)
+    if not ESP.Drawing.Chams.FullClone then
+        return buildProxyLegacy(e, char, cam)
+    end
     if e.proxy then e.proxy:Destroy() end
 
     -- клонируем весь персонаж (у него может быть выключен Archivable)
