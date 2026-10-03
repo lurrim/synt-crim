@@ -145,8 +145,14 @@ local BODY_PART = {
     [Enum.BodyPart.RightLeg] = "Right Leg",
 }
 
+-- Во сколько раз клон меньше оригинала. Скруглённые края настоящих R6-частей срезают углы,
+-- поэтому 0.99 слишком мало: клон торчит наружу. Меньше значение = меньше "красных краёв",
+-- но и клон за стеной чуть тоньше. Подбирай в диапазоне 0.90 - 0.98.
+local PROXY_SCALE = 0.94
+
 -- Запасной вариант: сборка по частям без Humanoid (старый способ)
 local function buildProxyLegacy(e, char, cam)
+    warn("[ESP] proxy: legacy mode for " .. tostring(char and char.Name))
     if e.proxy then e.proxy:Destroy() end
 
     -- R6-бандлы: форму конечности задаёт CharacterMesh на персонаже, а не сама часть
@@ -176,7 +182,7 @@ local function buildProxyLegacy(e, char, cam)
                     local sm = Instance.new("SpecialMesh")
                     sm.MeshType = Enum.MeshType.FileMesh
                     sm.MeshId = "rbxassetid://" .. meshId
-                    sm.Scale = Vector3.new(0.99, 0.99, 0.99)
+                    sm.Scale = Vector3.new(PROXY_SCALE, PROXY_SCALE, PROXY_SCALE)
                     sm.Parent = c
                 end
 
@@ -186,7 +192,7 @@ local function buildProxyLegacy(e, char, cam)
                 c.CanTouch = false
                 c.Massless = true
                 c.Transparency = 0
-                c.Size = c.Size * 0.99
+                c.Size = c.Size * PROXY_SCALE
                 c.Parent = model
                 src[#src + 1] = d
                 dst[#dst + 1] = c
@@ -207,6 +213,22 @@ local KILL = {
     BillboardGui = true, SurfaceGui = true,
 }
 
+-- Карта "путь -> инстанс". Одинаковые имена у соседей нумеруются по порядку,
+-- так сопоставление не ломается, если часть объектов не склонировалась (Archivable = false).
+local function indexTree(root, out)
+    local function walk(inst, path)
+        local seen = {}
+        for _, ch in ipairs(inst:GetChildren()) do
+            local key = ch.Name .. "|" .. ch.ClassName
+            seen[key] = (seen[key] or 0) + 1
+            local p = path .. "/" .. key .. "#" .. seen[key]
+            out[p] = ch
+            walk(ch, p)
+        end
+    end
+    walk(root, "")
+end
+
 local function buildProxy(e, char, cam)
     if e.proxy then e.proxy:Destroy() end
 
@@ -218,23 +240,21 @@ local function buildProxy(e, char, cam)
     if not ok or not model then return buildProxyLegacy(e, char, cam) end
 
     -- сопоставляем части оригинала и клона ДО любых удалений
-    local a, b = char:GetDescendants(), model:GetDescendants()
-    if #a ~= #b then
-        model:Destroy()
-        return buildProxyLegacy(e, char, cam)
-    end
+    local origMap, cloneMap = {}, {}
+    indexTree(char, origMap)
+    indexTree(model, cloneMap)
 
     local src, dst = {}, {}
-    for i = 1, #a do
-        local o, c = a[i], b[i]
-        if o.Name ~= c.Name or o.ClassName ~= c.ClassName then
-            model:Destroy()
-            return buildProxyLegacy(e, char, cam)
-        end
-        if o:IsA("BasePart") and o.Transparency < 0.95 and o.Name ~= "HumanoidRootPart" then
+    for path, o in pairs(origMap) do
+        local c = cloneMap[path]
+        if c and o:IsA("BasePart") and o.Transparency < 0.95 and o.Name ~= "HumanoidRootPart" then
             src[#src + 1] = o
             dst[#dst + 1] = c
         end
+    end
+    if #src == 0 then
+        model:Destroy()
+        return buildProxyLegacy(e, char, cam)
     end
 
     -- чистим клон
@@ -255,7 +275,7 @@ local function buildProxy(e, char, cam)
         end
     end
     for _, c in ipairs(dst) do
-        c.Size = c.Size * 0.99 -- против z-fighting
+        c.Size = c.Size * PROXY_SCALE -- против z-fighting и торчащих краёв
     end
 
     -- Humanoid оставляем (нужен, чтобы CharacterMesh применился), но делаем безвредным
