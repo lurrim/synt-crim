@@ -21,10 +21,10 @@ local ESP = {
             OutlineRGB = Color3.fromRGB(119, 120, 255),
             Outline_Transparency = 100,
             VisibleCheck = true,
-            MaxDistance = 200, -- можно уменьшить (напр. 120), Highlight самая тяжёлая часть
+            MaxDistance = 200,
         },
         Names = { Enabled = true },
-        Distances = { Enabled = true, Position = "Text" }, -- "Text" или "Bottom"
+        Distances = { Enabled = true, Position = "Text" },
         Weapons = { Enabled = true, WeaponTextRGB = Color3.fromRGB(119, 120, 255) },
         Healthbar = {
             Enabled = true,
@@ -38,6 +38,7 @@ local ESP = {
         Boxes = {
             Animate = true,
             RotationSpeed = 300,
+            BlackOutline = true, -- чёрный внешний оутлайн
             Gradient = false, GradientRGB1 = Color3.fromRGB(119, 120, 255), GradientRGB2 = Color3.fromRGB(0, 0, 0),
             GradientFill = true, GradientFillRGB1 = Color3.fromRGB(119, 120, 255), GradientFillRGB2 = Color3.fromRGB(0, 0, 0),
             Filled = { Enabled = true, Transparency = 0.75 },
@@ -47,9 +48,10 @@ local ESP = {
 }
 
 local lplayer = Players.LocalPlayer
-local floor, max, sin, cos, atan, pi = math.floor, math.max, math.sin, math.cos, math.atan, math.pi
+local floor, max, min, sin, cos, atan, pi = math.floor, math.max, math.min, math.sin, math.cos, math.atan, math.pi
 local fromOffset = UDim2.fromOffset
 local RGB = Color3.fromRGB
+local WHITE, BLACK = RGB(255, 255, 255), RGB(0, 0, 0)
 
 ------------------------------------------------------------------
 -- Кэш свойств: пишем в Instance только если значение реально изменилось
@@ -89,53 +91,63 @@ local function new(class, props)
 end
 
 ------------------------------------------------------------------
-local ScreenGui = new("ScreenGui", { Name = "ESPHolder", Parent = CoreGui, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+local ScreenGui = new("ScreenGui", {
+    Name = "ESPHolder", Parent = CoreGui,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, ResetOnSpawn = false,
+})
 
 local function newText(parent)
     return new("TextLabel", {
         Parent = parent, Size = UDim2.fromOffset(100, 20), AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundTransparency = 1, TextColor3 = RGB(255, 255, 255), Font = Enum.Font.Code,
-        TextSize = ESP.FontSize, TextStrokeTransparency = 0, TextStrokeColor3 = RGB(0, 0, 0),
+        BackgroundTransparency = 1, TextColor3 = WHITE, Font = Enum.Font.Code,
+        TextSize = ESP.FontSize, TextStrokeTransparency = 0, TextStrokeColor3 = BLACK,
         RichText = true,
     })
 end
 
-local function newFrame(parent, color)
-    return new("Frame", { Parent = parent, BackgroundColor3 = color, BorderSizePixel = 0 })
-end
-
 local list = {}
-
 local idxCounter = 0
 
 local function createESP(plr)
+    if list[plr] then return end -- защита от дублей (PlayerAdded + стартовый цикл)
+
     idxCounter += 1
     local D = ESP.Drawing
-    -- Один контейнер на игрока: скрыть всё = одна запись Visible
     local root = new("Frame", {
         Parent = ScreenGui, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
         BorderSizePixel = 0, Visible = false, Name = plr.Name,
     })
 
-    local e = { root = root, shown = false, idx = idxCounter }
+    local e = { root = root, shown = false, idx = idxCounter, conns = {} }
 
-    e.Box = new("Frame", { Parent = root, BackgroundColor3 = RGB(255, 255, 255), BorderSizePixel = 0 })
+    -- Внешний чёрный оутлайн (под боксом)
+    e.BlackOut = new("Frame", {
+        Parent = root, ZIndex = 1, BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+    })
+    e.BlackOutS = new("UIStroke", {
+        Parent = e.BlackOut, Color = BLACK, Thickness = 1, LineJoinMode = Enum.LineJoinMode.Miter,
+    })
+
+    -- Сам бокс: заливка + белая обводка
+    e.Box = new("Frame", {
+        Parent = root, ZIndex = 2, BackgroundColor3 = WHITE, BorderSizePixel = 0,
+    })
     e.Grad1 = new("UIGradient", {
         Parent = e.Box, Enabled = D.Boxes.GradientFill,
         Color = ColorSequence.new(D.Boxes.GradientFillRGB1, D.Boxes.GradientFillRGB2),
     })
     e.Outline = new("UIStroke", {
-        Parent = e.Box, Enabled = D.Boxes.Gradient, Transparency = 0,
-        Color = RGB(255, 255, 255), LineJoinMode = Enum.LineJoinMode.Miter,
+        Parent = e.Box, Enabled = true, Transparency = 0, Thickness = 1,
+        Color = WHITE, LineJoinMode = Enum.LineJoinMode.Miter,
     })
     e.Grad2 = new("UIGradient", {
         Parent = e.Outline, Enabled = D.Boxes.Gradient,
         Color = ColorSequence.new(D.Boxes.GradientRGB1, D.Boxes.GradientRGB2),
     })
 
-    e.BehindHB = new("Frame", { Parent = root, ZIndex = 1, BackgroundColor3 = RGB(0, 0, 0), BorderSizePixel = 0 })
-    e.HB = new("Frame", { Parent = root, ZIndex = 2, BackgroundColor3 = RGB(255, 255, 255), BorderSizePixel = 0 })
-    new("UIGradient", {
+    e.BehindHB = new("Frame", { Parent = root, ZIndex = 1, BackgroundColor3 = BLACK, BorderSizePixel = 0 })
+    e.HB = new("Frame", { Parent = root, ZIndex = 2, BackgroundColor3 = WHITE, BorderSizePixel = 0 })
+    e.HBGrad = new("UIGradient", {
         Parent = e.HB, Enabled = D.Healthbar.Gradient, Rotation = -90,
         Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, D.Healthbar.GradientRGB1),
@@ -157,7 +169,12 @@ local function createESP(plr)
         OutlineColor = D.Chams.OutlineRGB, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop, Enabled = false,
     })
 
-    -- Друзей проверяем ОДИН раз (раньше IsFriendsWith вызывался каждый кадр)
+    -- Респавн: сразу сбрасываем кэш персонажа, чтобы update переискал части
+    e.conns[1] = plr.CharacterAdded:Connect(function()
+        e.char, e.hrp, e.hum, e.nextFind = nil, nil, nil, 0
+    end)
+
+    -- Друзей проверяем ОДИН раз
     e.friend = false
     if ESP.Options.Friendcheck then
         task.spawn(function()
@@ -172,6 +189,7 @@ end
 local function removeESP(plr)
     local e = list[plr]
     if e then
+        for _, c in ipairs(e.conns) do c:Disconnect() end
         e.root:Destroy()
         list[plr] = nil
     end
@@ -187,21 +205,28 @@ end
 
 ------------------------------------------------------------------
 local rotation, frame = -45, 0
-local FRIEND_PREFIX = nil
 
 local function update(plr, e, camPos, cam, vpY, rot, tickNow)
-    -- кэш персонажа/частей
+    -- Персонаж / части. Переискиваем при смене персонажа ИЛИ если части пропали
+    -- (при респавне Character появляется раньше, чем HumanoidRootPart)
     local char = plr.Character
+    local hrp, hum = e.hrp, e.hum
     if char ~= e.char then
         e.char = char
-        e.hrp = char and char:FindFirstChild("HumanoidRootPart")
-        e.hum = char and char:FindFirstChildOfClass("Humanoid")
+        e.nextFind = 0
+        hrp, hum = nil, nil
+        e.hrp, e.hum = nil, nil
         e.Chams.Adornee = char
     end
-    local hrp, hum = e.hrp, e.hum
+    if char and (not hrp or not hum or not hrp.Parent or not hum.Parent) and tickNow >= (e.nextFind or 0) then
+        e.nextFind = tickNow + 0.25 -- не чаще 4 раз в секунду
+        hrp = char:FindFirstChild("HumanoidRootPart")
+        hum = char:FindFirstChildOfClass("Humanoid")
+        e.hrp, e.hum = hrp, hum
+    end
     if not hrp or not hum or not hrp.Parent then return hide(e) end
 
-    -- team check (как в оригинале)
+    -- team check
     if ESP.TeamCheck then
         local lt, pt = lplayer.Team, plr.Team
         if not ((lt ~= pt and pt) or (not lt and not pt)) then return hide(e) end
@@ -209,7 +234,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
 
     local hrpPos = hrp.Position
     local dist = (camPos - hrpPos).Magnitude / 3.5714285714
-    if dist > ESP.MaxDistance then return hide(e) end -- дешёвая отсечка до WorldToScreenPoint
+    if dist > ESP.MaxDistance then return hide(e) end
 
     local pos, onScreen = cam:WorldToScreenPoint(hrpPos)
     if not onScreen then return hide(e) end
@@ -225,7 +250,6 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
     local w, h = 3 * scale, 4.5 * scale
     local left, top = X - w / 2, Y - h / 2
 
-    -- прозрачность по дистанции: считаем ОДИН раз и квантуем (меньше записей)
     local fade = 0
     if ESP.FadeOut.OnDistance then
         fade = floor((1 - max(0.1, 1 - dist / ESP.MaxDistance)) * 20) / 20
@@ -246,16 +270,26 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         end
     end
 
-    -- Box
+    -- Box: белый оутлайн + чёрный снаружи
     do
         local B = D.Boxes
         local box = e.Box
+        local show = B.Full.Enabled
+
         place(box, left, top, w, h)
-        set(box, "Visible", B.Full.Enabled)
+        set(box, "Visible", show)
         local base = (B.Filled.Enabled and B.GradientFill) and B.Filled.Transparency or 1
         set(box, "BackgroundTransparency", base + (1 - base) * fade)
-        set(box, "BorderSizePixel", B.Filled.Enabled and 1 or 0)
         set(e.Outline, "Transparency", fade)
+        set(e.Outline, "Color", WHITE)
+
+        local bo = show and B.BlackOutline
+        set(e.BlackOut, "Visible", bo)
+        if bo then
+            place(e.BlackOut, left - 1, top - 1, w + 2, h + 2)
+            set(e.BlackOutS, "Transparency", fade)
+        end
+
         if B.Animate and w > 20 and (frame + e.idx) % 3 == 0 then
             e.Grad1.Rotation = rot
             e.Grad2.Rotation = rot
@@ -266,7 +300,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
     do
         local H = D.Healthbar
         local maxHp = hum.MaxHealth
-        local health = maxHp > 0 and max(0, math.min(1, hum.Health / maxHp)) or 0
+        local health = maxHp > 0 and max(0, min(1, hum.Health / maxHp)) or 0
         local hbX = left - 6
         set(e.HB, "Visible", H.Enabled)
         set(e.BehindHB, "Visible", H.Enabled)
@@ -294,7 +328,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         end
     end
 
-    -- Name + Distance (строки пересобираем только когда меняется целая дистанция)
+    -- Name + Distance
     do
         local d = floor(dist)
         local mode = D.Distances.Position
@@ -347,7 +381,6 @@ RunService.RenderStepped:Connect(function(dt)
     end
 
     local tickNow = tick()
-    -- вращение градиента считаем один раз за кадр (а не на каждого игрока)
     rotation += dt * ESP.Drawing.Boxes.RotationSpeed * cos(pi / 4 * tickNow - pi / 2)
     if not ESP.Drawing.Boxes.Animate then rotation = -45 end
 
@@ -366,25 +399,21 @@ Players.PlayerAdded:Connect(function(v)
 end)
 Players.PlayerRemoving:Connect(removeESP)
 
--- Применяет настройки, которые раньше читались только при создании (цвета градиентов, размер шрифта)
+-- Применяет настройки, которые читались только при создании
 function ESP.Refresh()
     local D = ESP.Drawing
     for _, e in pairs(list) do
         e.Grad1.Enabled = D.Boxes.GradientFill
         e.Grad1.Color = ColorSequence.new(D.Boxes.GradientFillRGB1, D.Boxes.GradientFillRGB2)
-        e.Outline.Enabled = D.Boxes.Gradient
         e.Grad2.Enabled = D.Boxes.Gradient
         e.Grad2.Color = ColorSequence.new(D.Boxes.GradientRGB1, D.Boxes.GradientRGB2)
 
-        local hg = e.HB:FindFirstChildOfClass("UIGradient")
-        if hg then
-            hg.Enabled = D.Healthbar.Gradient
-            hg.Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0, D.Healthbar.GradientRGB1),
-                ColorSequenceKeypoint.new(0.5, D.Healthbar.GradientRGB2),
-                ColorSequenceKeypoint.new(1, D.Healthbar.GradientRGB3),
-            })
-        end
+        e.HBGrad.Enabled = D.Healthbar.Gradient
+        e.HBGrad.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, D.Healthbar.GradientRGB1),
+            ColorSequenceKeypoint.new(0.5, D.Healthbar.GradientRGB2),
+            ColorSequenceKeypoint.new(1, D.Healthbar.GradientRGB3),
+        })
 
         e.Weapon.TextColor3 = D.Weapons.WeaponTextRGB
         for _, t in ipairs({ e.Name, e.Distance, e.Weapon, e.HealthText }) do
