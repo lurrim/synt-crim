@@ -22,7 +22,7 @@ local ESP = {
             Outline_Transparency = 100,
             VisibleCheck = true,
             MaxDistance = 200,
-            -- цвет для игрока, который за стеной (определяется рейкастом)
+            -- другой цвет для части тела, которая за стеной (по частям, а не целиком)
             HiddenEnabled = false,
             HiddenFillRGB = Color3.fromRGB(255, 80, 80),
             HiddenOutlineRGB = Color3.fromRGB(255, 80, 80),
@@ -57,6 +57,7 @@ local fromOffset = UDim2.fromOffset
 local RGB = Color3.fromRGB
 local WHITE, BLACK = RGB(255, 255, 255), RGB(0, 0, 0)
 local OCCLUDED, ALWAYS = Enum.HighlightDepthMode.Occluded, Enum.HighlightDepthMode.AlwaysOnTop
+local MOVE_MODE = Enum.BulkMoveMode.FireCFrameChanged
 
 ------------------------------------------------------------------
 -- Кэш свойств: пишем в Instance только если значение реально изменилось
@@ -96,26 +97,6 @@ local function new(class, props)
 end
 
 ------------------------------------------------------------------
--- Рейкаст для проверки "за стеной": игнорируем камеру и всех персонажей,
--- список фильтра обновляем раз в 0.5 с, а не каждый кадр
-------------------------------------------------------------------
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-rayParams.IgnoreWater = true
-rayParams.RespectCanCollide = true
-local nextFilter = 0
-
-local function refreshFilter(cam, tickNow)
-    if tickNow < nextFilter then return end
-    nextFilter = tickNow + 0.5
-    local f = { cam }
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Character then f[#f + 1] = p.Character end
-    end
-    rayParams.FilterDescendantsInstances = f
-end
-
-------------------------------------------------------------------
 local ScreenGui = new("ScreenGui", {
     Name = "ESPHolder", Parent = CoreGui,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, ResetOnSpawn = false,
@@ -133,6 +114,54 @@ end
 local list = {}
 local idxCounter = 0
 
+------------------------------------------------------------------
+-- Прокси-клон персонажа для "цвета за стеной".
+-- Roblox рисует только один Highlight на один объект, поэтому второй Highlight
+-- вешаем на невидимую копию персонажа, которая каждый кадр повторяет позы настоящего.
+-- Настоящий персонаж: Highlight в режиме Occluded (цвет видимой части).
+-- Копия: Highlight в режиме AlwaysOnTop (цвет того, что за стеной).
+------------------------------------------------------------------
+local function destroyProxy(e)
+    if e.proxy then
+        e.proxy:Destroy()
+        e.proxy, e.pSrc, e.pDst, e.pCF = nil, nil, nil, nil
+    end
+    e.ChamsHid.Adornee = nil
+end
+
+local function buildProxy(e, char, cam)
+    if e.proxy then e.proxy:Destroy() end
+
+    local model = Instance.new("Model")
+    local src, dst = {}, {}
+
+    for _, d in ipairs(char:GetDescendants()) do
+        if d:IsA("BasePart") and d.Transparency < 0.95 and d.Name ~= "HumanoidRootPart" then
+            local ok, c = pcall(d.Clone, d)
+            if ok and c then
+                -- оставляем только форму (SpecialMesh), остальное (веллы, скрипты, текстуры) не нужно
+                for _, ch in ipairs(c:GetChildren()) do
+                    if not ch:IsA("SpecialMesh") then ch:Destroy() end
+                end
+                c.Anchored = true
+                c.CanCollide = false
+                c.CanQuery = false
+                c.CanTouch = false
+                c.Massless = true
+                c.Transparency = 0.999 -- не 1: Highlight не рисуется на полностью прозрачных частях
+                c.Parent = model
+                src[#src + 1] = d
+                dst[#dst + 1] = c
+            end
+        end
+    end
+
+    model.Parent = cam
+    e.proxy, e.pSrc, e.pDst = model, src, dst
+    e.pCF = table.create(#src, CFrame.new())
+    e.ChamsHid.Adornee = model
+end
+
 local function createESP(plr)
     if list[plr] then return end -- защита от дублей (PlayerAdded + стартовый цикл)
 
@@ -143,7 +172,7 @@ local function createESP(plr)
         BorderSizePixel = 0, Visible = false, Name = plr.Name,
     })
 
-    local e = { root = root, shown = false, idx = idxCounter, conns = {}, vis = true }
+    local e = { root = root, shown = false, idx = idxCounter, conns = {} }
 
     -- Внешний чёрный оутлайн (под боксом)
     e.BlackOut = new("Frame", {
@@ -189,10 +218,16 @@ local function createESP(plr)
     e.HealthText = newText(root)
     e.HealthText.RichText = false
 
-    -- Ровно ОДИН Highlight на игрока (два Highlight на одном персонаже конфликтуют)
+    -- Основной Highlight на настоящем персонаже
     e.Chams = new("Highlight", {
         Parent = root, FillTransparency = 1, OutlineTransparency = 0,
         FillColor = D.Chams.FillRGB, OutlineColor = D.Chams.OutlineRGB,
+        DepthMode = ALWAYS, Enabled = false,
+    })
+    -- Второй Highlight: Adornee = прокси-клон (создаётся только когда включён Hidden color)
+    e.ChamsHid = new("Highlight", {
+        Parent = root, FillTransparency = 1, OutlineTransparency = 0,
+        FillColor = D.Chams.HiddenFillRGB, OutlineColor = D.Chams.HiddenOutlineRGB,
         DepthMode = ALWAYS, Enabled = false,
     })
 
@@ -217,6 +252,7 @@ local function removeESP(plr)
     local e = list[plr]
     if e then
         for _, c in ipairs(e.conns) do c:Disconnect() end
+        if e.proxy then e.proxy:Destroy() end
         e.root:Destroy()
         list[plr] = nil
     end
@@ -228,6 +264,7 @@ local function hide(e)
         e.root.Visible = false
         -- через set(), чтобы кэш знал, что Highlight выключен
         set(e.Chams, "Enabled", false)
+        set(e.ChamsHid, "Enabled", false)
     end
 end
 
@@ -245,6 +282,8 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         hrp, hum = nil, nil
         e.hrp, e.hum = nil, nil
         e.Chams.Adornee = char
+        e.proxyChar = nil
+        destroyProxy(e) -- старая копия принадлежала прошлому персонажу
     end
     if char and (not hrp or not hum or not hrp.Parent or not hum.Parent) and tickNow >= (e.nextFind or 0) then
         e.nextFind = tickNow + 0.25 -- не чаще 4 раз в секунду
@@ -286,38 +325,59 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
     -- Chams
     do
         local C = D.Chams
-        local ch = e.Chams
+        local ch, chh = e.Chams, e.ChamsHid
         local on = C.Enabled and dist <= (C.MaxDistance or ESP.MaxDistance)
         local hiddenOn = on and C.HiddenEnabled
 
-        -- Видимость игрока: рейкаст от камеры до HRP и головы, не каждый кадр (по очереди для игроков)
-        if hiddenOn and (frame + e.idx) % 3 == 0 then
-            local visible = not Workspace:Raycast(camPos, hrpPos - camPos, rayParams)
-            if not visible then
-                local head = char and char:FindFirstChild("Head")
-                if head then
-                    visible = not Workspace:Raycast(camPos, head.Position - camPos, rayParams)
+        -- Прокси-клон: строим один раз на персонажа (+ пересборка через 2 с, когда догрузятся аксессуары)
+        if hiddenOn and e.proxyChar ~= char then
+            e.proxyChar = char
+            buildProxy(e, char, cam)
+            task.delay(2, function()
+                if list[plr] == e and e.char == char and ESP.Drawing.Chams.HiddenEnabled then
+                    buildProxy(e, char, cam)
                 end
-            end
-            e.vis = visible
+            end)
         end
 
-        local useHidden = hiddenOn and not e.vis
+        -- Синхронизация позы копии (один BulkMoveTo на игрока в кадр)
+        local synced = hiddenOn and e.proxy ~= nil
+        if synced then
+            local src, cf = e.pSrc, e.pCF
+            for i = 1, #src do cf[i] = src[i].CFrame end
+            Workspace:BulkMoveTo(e.pDst, cf, MOVE_MODE)
+        end
+
         set(ch, "Enabled", on)
-        set(ch, "FillColor", useHidden and C.HiddenFillRGB or C.FillRGB)
-        set(ch, "OutlineColor", useHidden and C.HiddenOutlineRGB or C.OutlineRGB)
-        -- Hidden color включён: чамсы всегда видны сквозь стены, цвет зависит от рейкаста
-        set(ch, "DepthMode", (not hiddenOn and C.VisibleCheck) and OCCLUDED or ALWAYS)
+        set(ch, "FillColor", C.FillRGB)
+        set(ch, "OutlineColor", C.OutlineRGB)
+        -- Hidden color включён: настоящий персонаж = только видимые части, копия = всё остальное
+        set(ch, "DepthMode", (hiddenOn or C.VisibleCheck) and OCCLUDED or ALWAYS)
+
+        set(chh, "Enabled", synced)
+        if synced then
+            set(chh, "FillColor", C.HiddenFillRGB)
+            set(chh, "OutlineColor", C.HiddenOutlineRGB)
+        end
 
         if C.Thermal then
             if (frame + e.idx) % 3 == 0 then
                 local b = atan(sin(tickNow * 2)) * 2 / pi
-                ch.FillTransparency = C.Fill_Transparency * b * 0.01
-                ch.OutlineTransparency = C.Outline_Transparency * b * 0.01
+                local ft = C.Fill_Transparency * b * 0.01
+                local ot = C.Outline_Transparency * b * 0.01
+                ch.FillTransparency, ch.OutlineTransparency = ft, ot
+                if synced then
+                    chh.FillTransparency, chh.OutlineTransparency = ft, ot
+                end
             end
         else
-            set(ch, "FillTransparency", C.Fill_Transparency * 0.01)
-            set(ch, "OutlineTransparency", C.Outline_Transparency * 0.01)
+            local ft, ot = C.Fill_Transparency * 0.01, C.Outline_Transparency * 0.01
+            set(ch, "FillTransparency", ft)
+            set(ch, "OutlineTransparency", ot)
+            if synced then
+                set(chh, "FillTransparency", ft)
+                set(chh, "OutlineTransparency", ot)
+            end
         end
     end
 
@@ -435,10 +495,6 @@ RunService.RenderStepped:Connect(function(dt)
     rotation += dt * ESP.Drawing.Boxes.RotationSpeed * cos(pi / 4 * tickNow - pi / 2)
     if not ESP.Drawing.Boxes.Animate then rotation = -45 end
 
-    if ESP.Drawing.Chams.HiddenEnabled then
-        refreshFilter(cam, tickNow)
-    end
-
     local camPos = cam.CFrame.Position
     local vpY = cam.ViewportSize.Y
     for plr, e in pairs(list) do
@@ -473,6 +529,12 @@ function ESP.Refresh()
         e.Weapon.TextColor3 = D.Weapons.WeaponTextRGB
         for _, t in ipairs({ e.Name, e.Distance, e.Weapon, e.HealthText }) do
             t.TextSize = ESP.FontSize
+        end
+
+        -- Hidden color выключили: копии больше не нужны
+        if not D.Chams.HiddenEnabled and e.proxy then
+            destroyProxy(e)
+            e.proxyChar = nil
         end
     end
 end
