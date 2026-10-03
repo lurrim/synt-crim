@@ -132,8 +132,26 @@ local function destroyProxy(e)
     e.ChamsHid.Adornee = nil
 end
 
+local BODY_PART = {
+    [Enum.BodyPart.Head] = "Head",
+    [Enum.BodyPart.Torso] = "Torso",
+    [Enum.BodyPart.LeftArm] = "Left Arm",
+    [Enum.BodyPart.RightArm] = "Right Arm",
+    [Enum.BodyPart.LeftLeg] = "Left Leg",
+    [Enum.BodyPart.RightLeg] = "Right Leg",
+}
+
 local function buildProxy(e, char, cam)
     if e.proxy then e.proxy:Destroy() end
+
+    -- R6-бандлы: форму конечности задаёт CharacterMesh на персонаже, а не сама часть
+    local overrides = {}
+    for _, cm in ipairs(char:GetChildren()) do
+        if cm:IsA("CharacterMesh") and cm.MeshId ~= 0 then
+            local partName = BODY_PART[cm.BodyPart]
+            if partName then overrides[partName] = cm.MeshId end
+        end
+    end
 
     local model = Instance.new("Model")
     local src, dst = {}, {}
@@ -142,17 +160,28 @@ local function buildProxy(e, char, cam)
         if d:IsA("BasePart") and d.Transparency < 0.95 and d.Name ~= "HumanoidRootPart" then
             local ok, c = pcall(d.Clone, d)
             if ok and c then
-                -- оставляем только форму (SpecialMesh), остальное (веллы, скрипты, текстуры) не нужно
+                local meshId = d.Parent == char and overrides[d.Name]
+
+                -- оставляем только форму; если есть бандл, старый SpecialMesh тоже убираем
                 for _, ch in ipairs(c:GetChildren()) do
-                    if not ch:IsA("SpecialMesh") then ch:Destroy() end
+                    if not ch:IsA("SpecialMesh") or meshId then ch:Destroy() end
                 end
+
+                if meshId then
+                    local sm = Instance.new("SpecialMesh")
+                    sm.MeshType = Enum.MeshType.FileMesh
+                    sm.MeshId = "rbxassetid://" .. meshId
+                    sm.Scale = Vector3.new(0.99, 0.99, 0.99)
+                    sm.Parent = c
+                end
+
                 c.Anchored = true
                 c.CanCollide = false
                 c.CanQuery = false
                 c.CanTouch = false
                 c.Massless = true
-                c.Transparency = 0 -- не 1: Highlight не рисуется на полностью прозрачных частях
-                c.Size = c.Size * 0.99 -- чуть меньше оригинала, чтобы не было z-fighting с маской
+                c.Transparency = 0
+                c.Size = c.Size * 0.99
                 c.Parent = model
                 src[#src + 1] = d
                 dst[#dst + 1] = c
