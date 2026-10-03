@@ -30,6 +30,9 @@ local ESP = {
             Enabled = true,
             HealthText = true, Lerp = false, HealthTextRGB = Color3.fromRGB(119, 120, 255),
             Width = 2.5,
+            Smooth = true,       -- плавное изменение полоски
+            SmoothSpeed = 8,     -- больше = быстрее
+            TextFadeSpeed = 10,  -- скорость появления/исчезновения текста
             Gradient = true,
             GradientRGB1 = Color3.fromRGB(200, 0, 0),
             GradientRGB2 = Color3.fromRGB(60, 60, 125),
@@ -48,7 +51,7 @@ local ESP = {
 }
 
 local lplayer = Players.LocalPlayer
-local floor, max, min, sin, cos, atan, pi = math.floor, math.max, math.min, math.sin, math.cos, math.atan, math.pi
+local floor, max, min, sin, cos, atan, pi, exp = math.floor, math.max, math.min, math.sin, math.cos, math.atan, math.pi, math.exp
 local fromOffset = UDim2.fromOffset
 local RGB = Color3.fromRGB
 local WHITE, BLACK = RGB(255, 255, 255), RGB(0, 0, 0)
@@ -164,6 +167,9 @@ local function createESP(plr)
     e.Weapon.TextColor3 = D.Weapons.WeaponTextRGB
     e.HealthText = newText(root)
     e.HealthText.RichText = false
+    -- текст прижат правым краем и стоит слева от полоски
+    e.HealthText.AnchorPoint = Vector2.new(1, 0.5)
+    e.dispHealth, e.textAlpha = nil, 0
 
     -- Основной Highlight на настоящем персонаже
     e.Chams = new("Highlight", {
@@ -202,6 +208,7 @@ local function hide(e)
     if e.shown then
         e.shown = false
         e.root.Visible = false
+        e.dispHealth, e.textAlpha = nil, 0 -- при новом появлении без «прокрутки»
         -- через set(), чтобы кэш знал, что Highlight выключен
         set(e.Chams, "Enabled", false)
     end
@@ -210,7 +217,7 @@ end
 ------------------------------------------------------------------
 local rotation, frame = -45, 0
 
-local function update(plr, e, camPos, cam, vpY, rot, tickNow)
+local function update(plr, e, camPos, cam, vpY, rot, tickNow, dt)
     -- Персонаж / части. Переискиваем при смене персонажа ИЛИ если части пропали
     -- (при респавне Character появляется раньше, чем HumanoidRootPart)
     local char = plr.Character
@@ -313,7 +320,18 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
     do
         local H = D.Healthbar
         local maxHp = hum.MaxHealth
-        local health = maxHp > 0 and max(0, min(1, hum.Health / maxHp)) or 0
+        local target = maxHp > 0 and max(0, min(1, hum.Health / maxHp)) or 0
+
+        -- плавная полоска: быстро в начале, медленно к концу
+        if not e.dispHealth or not H.Smooth then
+            e.dispHealth = target
+        else
+            local k = 1 - exp(-dt * H.SmoothSpeed)
+            e.dispHealth = e.dispHealth + (target - e.dispHealth) * k
+            if math.abs(target - e.dispHealth) < 0.001 then e.dispHealth = target end
+        end
+        local health = e.dispHealth
+
         local hbX = left - 6
         set(e.HB, "Visible", H.Enabled)
         set(e.BehindHB, "Visible", H.Enabled)
@@ -322,17 +340,25 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         set(e.HB, "BackgroundTransparency", fade)
         set(e.BehindHB, "BackgroundTransparency", fade)
 
+        -- плавное появление/исчезновение текста
         local ht = e.HealthText
-        if H.HealthText and health < 1 then
-            local pct = floor(health * 100)
-            place(ht, hbX, top + h * (1 - health) + 3)
-            set(ht, "Text", tostring(pct))
+        local wantText = H.HealthText and target < 1
+        local ka = 1 - exp(-dt * H.TextFadeSpeed)
+        e.textAlpha = e.textAlpha + ((wantText and 1 or 0) - e.textAlpha) * ka
+        if e.textAlpha < 0.01 then e.textAlpha = 0 end
+
+        if e.textAlpha > 0 then
+            -- слева от полоски, на уровне верхушки заливки
+            place(ht, hbX - 3, top + h * (1 - health))
+            set(ht, "Text", tostring(floor(health * 100 + 0.5)))
             set(ht, "Visible", true)
-            set(ht, "TextTransparency", fade)
+            local tr = fade + (1 - fade) * (1 - e.textAlpha)
+            set(ht, "TextTransparency", tr)
+            set(ht, "TextStrokeTransparency", tr)
             if H.Lerp then
                 set(ht, "TextColor3",
-                    health >= 0.75 and RGB(0, 255, 0) or health >= 0.5 and RGB(255, 255, 0)
-                    or health >= 0.25 and RGB(255, 170, 0) or RGB(255, 0, 0))
+                    target >= 0.75 and RGB(0, 255, 0) or target >= 0.5 and RGB(255, 255, 0)
+                    or target >= 0.25 and RGB(255, 170, 0) or RGB(255, 0, 0))
             else
                 set(ht, "TextColor3", H.HealthTextRGB)
             end
@@ -400,7 +426,7 @@ RunService.RenderStepped:Connect(function(dt)
     local camPos = cam.CFrame.Position
     local vpY = cam.ViewportSize.Y
     for plr, e in pairs(list) do
-        update(plr, e, camPos, cam, vpY, rotation, tickNow)
+        update(plr, e, camPos, cam, vpY, rotation, tickNow, dt)
     end
 end)
 
