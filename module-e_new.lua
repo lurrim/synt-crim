@@ -169,6 +169,7 @@ local function createESP(plr)
     e.HealthText.RichText = false
     -- текст прижат правым краем и стоит слева от полоски
     e.HealthText.AnchorPoint = Vector2.new(1, 0.5)
+    e.HealthText.TextXAlignment = Enum.TextXAlignment.Right
     e.dispHealth, e.textAlpha = nil, 0
 
     -- Основной Highlight на настоящем персонаже
