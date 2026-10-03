@@ -22,7 +22,7 @@ local ESP = {
             Outline_Transparency = 100,
             VisibleCheck = true,
             MaxDistance = 200,
-            -- цвет части тела за стеной (второй Highlight)
+            -- цвет для игрока, который за стеной (определяется рейкастом)
             HiddenEnabled = false,
             HiddenFillRGB = Color3.fromRGB(255, 80, 80),
             HiddenOutlineRGB = Color3.fromRGB(255, 80, 80),
@@ -96,6 +96,26 @@ local function new(class, props)
 end
 
 ------------------------------------------------------------------
+-- Рейкаст для проверки "за стеной": игнорируем камеру и всех персонажей,
+-- список фильтра обновляем раз в 0.5 с, а не каждый кадр
+------------------------------------------------------------------
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+rayParams.RespectCanCollide = true
+local nextFilter = 0
+
+local function refreshFilter(cam, tickNow)
+    if tickNow < nextFilter then return end
+    nextFilter = tickNow + 0.5
+    local f = { cam }
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then f[#f + 1] = p.Character end
+    end
+    rayParams.FilterDescendantsInstances = f
+end
+
+------------------------------------------------------------------
 local ScreenGui = new("ScreenGui", {
     Name = "ESPHolder", Parent = CoreGui,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling, ResetOnSpawn = false,
@@ -123,7 +143,7 @@ local function createESP(plr)
         BorderSizePixel = 0, Visible = false, Name = plr.Name,
     })
 
-    local e = { root = root, shown = false, idx = idxCounter, conns = {} }
+    local e = { root = root, shown = false, idx = idxCounter, conns = {}, vis = true }
 
     -- Внешний чёрный оутлайн (под боксом)
     e.BlackOut = new("Frame", {
@@ -169,16 +189,10 @@ local function createESP(plr)
     e.HealthText = newText(root)
     e.HealthText.RichText = false
 
-    -- Основной Highlight (видимая часть, либо единственный)
+    -- Ровно ОДИН Highlight на игрока (два Highlight на одном персонаже конфликтуют)
     e.Chams = new("Highlight", {
         Parent = root, FillTransparency = 1, OutlineTransparency = 0,
         FillColor = D.Chams.FillRGB, OutlineColor = D.Chams.OutlineRGB,
-        DepthMode = ALWAYS, Enabled = false,
-    })
-    -- Второй Highlight: рисуется поверх стен своим цветом (часть за стеной)
-    e.ChamsHid = new("Highlight", {
-        Parent = root, FillTransparency = 1, OutlineTransparency = 0,
-        FillColor = D.Chams.HiddenFillRGB, OutlineColor = D.Chams.HiddenOutlineRGB,
         DepthMode = ALWAYS, Enabled = false,
     })
 
@@ -212,10 +226,8 @@ local function hide(e)
     if e.shown then
         e.shown = false
         e.root.Visible = false
-        -- ВАЖНО: через set(), иначе кэш думает что Enabled всё ещё true
-        -- и после возвращения игрока в зону видимости чамсы больше не включаются
+        -- через set(), чтобы кэш знал, что Highlight выключен
         set(e.Chams, "Enabled", false)
-        set(e.ChamsHid, "Enabled", false)
     end
 end
 
@@ -233,7 +245,6 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         hrp, hum = nil, nil
         e.hrp, e.hum = nil, nil
         e.Chams.Adornee = char
-        e.ChamsHid.Adornee = char
     end
     if char and (not hrp or not hum or not hrp.Parent or not hum.Parent) and tickNow >= (e.nextFind or 0) then
         e.nextFind = tickNow + 0.25 -- не чаще 4 раз в секунду
@@ -275,41 +286,38 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
     -- Chams
     do
         local C = D.Chams
-        local ch, chh = e.Chams, e.ChamsHid
+        local ch = e.Chams
         local on = C.Enabled and dist <= (C.MaxDistance or ESP.MaxDistance)
         local hiddenOn = on and C.HiddenEnabled
 
-        set(ch, "Enabled", on)
-        set(ch, "FillColor", C.FillRGB)
-        set(ch, "OutlineColor", C.OutlineRGB)
-        -- Hidden color включён: основной рисуется только на видимых частях,
-        -- а второй (AlwaysOnTop) закрашивает то, что за стеной
-        set(ch, "DepthMode", (hiddenOn or C.VisibleCheck) and OCCLUDED or ALWAYS)
-
-        set(chh, "Enabled", hiddenOn)
-        if hiddenOn then
-            set(chh, "FillColor", C.HiddenFillRGB)
-            set(chh, "OutlineColor", C.HiddenOutlineRGB)
+        -- Видимость игрока: рейкаст от камеры до HRP и головы, не каждый кадр (по очереди для игроков)
+        if hiddenOn and (frame + e.idx) % 3 == 0 then
+            local visible = not Workspace:Raycast(camPos, hrpPos - camPos, rayParams)
+            if not visible then
+                local head = char and char:FindFirstChild("Head")
+                if head then
+                    visible = not Workspace:Raycast(camPos, head.Position - camPos, rayParams)
+                end
+            end
+            e.vis = visible
         end
+
+        local useHidden = hiddenOn and not e.vis
+        set(ch, "Enabled", on)
+        set(ch, "FillColor", useHidden and C.HiddenFillRGB or C.FillRGB)
+        set(ch, "OutlineColor", useHidden and C.HiddenOutlineRGB or C.OutlineRGB)
+        -- Hidden color включён: чамсы всегда видны сквозь стены, цвет зависит от рейкаста
+        set(ch, "DepthMode", (not hiddenOn and C.VisibleCheck) and OCCLUDED or ALWAYS)
 
         if C.Thermal then
             if (frame + e.idx) % 3 == 0 then
                 local b = atan(sin(tickNow * 2)) * 2 / pi
-                local ft = C.Fill_Transparency * b * 0.01
-                local ot = C.Outline_Transparency * b * 0.01
-                ch.FillTransparency, ch.OutlineTransparency = ft, ot
-                if hiddenOn then
-                    chh.FillTransparency, chh.OutlineTransparency = ft, ot
-                end
+                ch.FillTransparency = C.Fill_Transparency * b * 0.01
+                ch.OutlineTransparency = C.Outline_Transparency * b * 0.01
             end
         else
-            local ft, ot = C.Fill_Transparency * 0.01, C.Outline_Transparency * 0.01
-            set(ch, "FillTransparency", ft)
-            set(ch, "OutlineTransparency", ot)
-            if hiddenOn then
-                set(chh, "FillTransparency", ft)
-                set(chh, "OutlineTransparency", ot)
-            end
+            set(ch, "FillTransparency", C.Fill_Transparency * 0.01)
+            set(ch, "OutlineTransparency", C.Outline_Transparency * 0.01)
         end
     end
 
@@ -426,6 +434,10 @@ RunService.RenderStepped:Connect(function(dt)
     local tickNow = tick()
     rotation += dt * ESP.Drawing.Boxes.RotationSpeed * cos(pi / 4 * tickNow - pi / 2)
     if not ESP.Drawing.Boxes.Animate then rotation = -45 end
+
+    if ESP.Drawing.Chams.HiddenEnabled then
+        refreshFilter(cam, tickNow)
+    end
 
     local camPos = cam.CFrame.Position
     local vpY = cam.ViewportSize.Y
