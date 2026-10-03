@@ -123,6 +123,10 @@ local idxCounter = 0
 --     (ниже в update она ограничена до 0.999, когда включён Hidden color).
 --   * Копия: Highlight в режиме AlwaysOnTop. Из-за маски он виден только за стеной.
 --   * Копия на 1% меньше оригинала, чтобы не было z-fighting.
+--
+-- Клон делается из ВСЕГО персонажа вместе с Humanoid: CharacterMesh (R6-бандлы)
+-- применяет движок, и только если в модели есть Humanoid. Так форма клона
+-- (со сглаженными краями) совпадает с оригиналом и не торчит наружу.
 ------------------------------------------------------------------
 local function destroyProxy(e)
     if e.proxy then
@@ -141,7 +145,8 @@ local BODY_PART = {
     [Enum.BodyPart.RightLeg] = "Right Leg",
 }
 
-local function buildProxy(e, char, cam)
+-- Запасной вариант: сборка по частям без Humanoid (старый способ)
+local function buildProxyLegacy(e, char, cam)
     if e.proxy then e.proxy:Destroy() end
 
     -- R6-бандлы: форму конечности задаёт CharacterMesh на персонаже, а не сама часть
@@ -187,6 +192,81 @@ local function buildProxy(e, char, cam)
                 dst[#dst + 1] = c
             end
         end
+    end
+
+    model.Parent = cam
+    e.proxy, e.pSrc, e.pDst = model, src, dst
+    e.pCF = table.create(#src, CFrame.new())
+    e.ChamsHid.Adornee = model
+end
+
+-- Что выкидываем из клона: скрипты, звуки, анимации, чужие подсветки и GUI
+local KILL = {
+    Script = true, LocalScript = true, ModuleScript = true, Sound = true,
+    Highlight = true, ForceField = true, Animator = true,
+    BillboardGui = true, SurfaceGui = true,
+}
+
+local function buildProxy(e, char, cam)
+    if e.proxy then e.proxy:Destroy() end
+
+    -- клонируем весь персонаж (у него может быть выключен Archivable)
+    local wasArch = char.Archivable
+    char.Archivable = true
+    local ok, model = pcall(char.Clone, char)
+    char.Archivable = wasArch
+    if not ok or not model then return buildProxyLegacy(e, char, cam) end
+
+    -- сопоставляем части оригинала и клона ДО любых удалений
+    local a, b = char:GetDescendants(), model:GetDescendants()
+    if #a ~= #b then
+        model:Destroy()
+        return buildProxyLegacy(e, char, cam)
+    end
+
+    local src, dst = {}, {}
+    for i = 1, #a do
+        local o, c = a[i], b[i]
+        if o.Name ~= c.Name or o.ClassName ~= c.ClassName then
+            model:Destroy()
+            return buildProxyLegacy(e, char, cam)
+        end
+        if o:IsA("BasePart") and o.Transparency < 0.95 and o.Name ~= "HumanoidRootPart" then
+            src[#src + 1] = o
+            dst[#dst + 1] = c
+        end
+    end
+
+    -- чистим клон
+    for _, d in ipairs(model:GetDescendants()) do
+        if KILL[d.ClassName] then
+            d:Destroy()
+        elseif d:IsA("BasePart") then
+            d.Anchored = true
+            d.CanCollide = false
+            d.CanQuery = false
+            d.CanTouch = false
+            d.Massless = true
+            if d.Transparency >= 0.95 or d.Name == "HumanoidRootPart" then
+                d.Transparency = 1
+            else
+                d.Transparency = 0
+            end
+        end
+    end
+    for _, c in ipairs(dst) do
+        c.Size = c.Size * 0.99 -- против z-fighting
+    end
+
+    -- Humanoid оставляем (нужен, чтобы CharacterMesh применился), но делаем безвредным
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+        hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+        hum.BreakJointsOnDeath = false
+        hum.RequiresNeck = false
+        hum.NameDisplayDistance = 0
+        hum.HealthDisplayDistance = 0
     end
 
     model.Parent = cam
