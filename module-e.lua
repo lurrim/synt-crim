@@ -22,6 +22,10 @@ local ESP = {
             Outline_Transparency = 100,
             VisibleCheck = true,
             MaxDistance = 200,
+            -- цвет части тела за стеной (второй Highlight)
+            HiddenEnabled = false,
+            HiddenFillRGB = Color3.fromRGB(255, 80, 80),
+            HiddenOutlineRGB = Color3.fromRGB(255, 80, 80),
         },
         Names = { Enabled = true },
         Distances = { Enabled = true, Position = "Text" },
@@ -52,6 +56,7 @@ local floor, max, min, sin, cos, atan, pi = math.floor, math.max, math.min, math
 local fromOffset = UDim2.fromOffset
 local RGB = Color3.fromRGB
 local WHITE, BLACK = RGB(255, 255, 255), RGB(0, 0, 0)
+local OCCLUDED, ALWAYS = Enum.HighlightDepthMode.Occluded, Enum.HighlightDepthMode.AlwaysOnTop
 
 ------------------------------------------------------------------
 -- Кэш свойств: пишем в Instance только если значение реально изменилось
@@ -164,9 +169,17 @@ local function createESP(plr)
     e.HealthText = newText(root)
     e.HealthText.RichText = false
 
+    -- Основной Highlight (видимая часть, либо единственный)
     e.Chams = new("Highlight", {
         Parent = root, FillTransparency = 1, OutlineTransparency = 0,
-        OutlineColor = D.Chams.OutlineRGB, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop, Enabled = false,
+        FillColor = D.Chams.FillRGB, OutlineColor = D.Chams.OutlineRGB,
+        DepthMode = ALWAYS, Enabled = false,
+    })
+    -- Второй Highlight: рисуется поверх стен своим цветом (часть за стеной)
+    e.ChamsHid = new("Highlight", {
+        Parent = root, FillTransparency = 1, OutlineTransparency = 0,
+        FillColor = D.Chams.HiddenFillRGB, OutlineColor = D.Chams.HiddenOutlineRGB,
+        DepthMode = ALWAYS, Enabled = false,
     })
 
     -- Респавн: сразу сбрасываем кэш персонажа, чтобы update переискал части
@@ -199,7 +212,10 @@ local function hide(e)
     if e.shown then
         e.shown = false
         e.root.Visible = false
-        e.Chams.Enabled = false
+        -- ВАЖНО: через set(), иначе кэш думает что Enabled всё ещё true
+        -- и после возвращения игрока в зону видимости чамсы больше не включаются
+        set(e.Chams, "Enabled", false)
+        set(e.ChamsHid, "Enabled", false)
     end
 end
 
@@ -217,6 +233,7 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
         hrp, hum = nil, nil
         e.hrp, e.hum = nil, nil
         e.Chams.Adornee = char
+        e.ChamsHid.Adornee = char
     end
     if char and (not hrp or not hum or not hrp.Parent or not hum.Parent) and tickNow >= (e.nextFind or 0) then
         e.nextFind = tickNow + 0.25 -- не чаще 4 раз в секунду
@@ -258,15 +275,41 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow)
     -- Chams
     do
         local C = D.Chams
-        local ch = e.Chams
-        set(ch, "Enabled", C.Enabled and dist <= (C.MaxDistance or ESP.MaxDistance))
+        local ch, chh = e.Chams, e.ChamsHid
+        local on = C.Enabled and dist <= (C.MaxDistance or ESP.MaxDistance)
+        local hiddenOn = on and C.HiddenEnabled
+
+        set(ch, "Enabled", on)
         set(ch, "FillColor", C.FillRGB)
         set(ch, "OutlineColor", C.OutlineRGB)
-        set(ch, "DepthMode", C.VisibleCheck and Enum.HighlightDepthMode.Occluded or Enum.HighlightDepthMode.AlwaysOnTop)
-        if C.Thermal and (frame + e.idx) % 3 == 0 then
-            local b = atan(sin(tickNow * 2)) * 2 / pi
-            ch.FillTransparency = C.Fill_Transparency * b * 0.01
-            ch.OutlineTransparency = C.Outline_Transparency * b * 0.01
+        -- Hidden color включён: основной рисуется только на видимых частях,
+        -- а второй (AlwaysOnTop) закрашивает то, что за стеной
+        set(ch, "DepthMode", (hiddenOn or C.VisibleCheck) and OCCLUDED or ALWAYS)
+
+        set(chh, "Enabled", hiddenOn)
+        if hiddenOn then
+            set(chh, "FillColor", C.HiddenFillRGB)
+            set(chh, "OutlineColor", C.HiddenOutlineRGB)
+        end
+
+        if C.Thermal then
+            if (frame + e.idx) % 3 == 0 then
+                local b = atan(sin(tickNow * 2)) * 2 / pi
+                local ft = C.Fill_Transparency * b * 0.01
+                local ot = C.Outline_Transparency * b * 0.01
+                ch.FillTransparency, ch.OutlineTransparency = ft, ot
+                if hiddenOn then
+                    chh.FillTransparency, chh.OutlineTransparency = ft, ot
+                end
+            end
+        else
+            local ft, ot = C.Fill_Transparency * 0.01, C.Outline_Transparency * 0.01
+            set(ch, "FillTransparency", ft)
+            set(ch, "OutlineTransparency", ot)
+            if hiddenOn then
+                set(chh, "FillTransparency", ft)
+                set(chh, "OutlineTransparency", ot)
+            end
         end
     end
 
