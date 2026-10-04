@@ -18,7 +18,7 @@ local M = {
     SmoothFOV = { Enabled = false, Value = 90, Speed = 8, PauseOnAim = false },
     NoBob     = { Enabled = false },
     Equip     = { Enabled = false, AnimSpeed = 50 }, -- AnimSpeed не ставить в 0 (EquipM делит на него)
-    ForceFire = { Enabled = false },
+    ForceFire = { Enabled = false, Sprint = true },  -- Sprint: разрешить стрельбу в спринте
 }
 
 local function isAiming()
@@ -293,14 +293,30 @@ function M.SetInstantEquip(state)
 end
 
 ------------------------------------------------------------------
--- Force fire (стрельба без замедления)
--- GunClient после каждого выстрела читает config.FireSlowDown и, если Enabled = true,
--- вешает замедление AffectChar("SD", Time, ..., Amount). Находим эти таблицы через getgc
--- и выключаем Enabled, при выключении возвращаем исходное значение.
+-- Force fire (стрельба без замедления и в спринте)
+-- 1) GunClient после каждого выстрела читает config.FireSlowDown и, если Enabled = true,
+--    вешает замедление AffectChar("SD", Time, ..., Amount). Находим эти таблицы через getgc
+--    и выключаем Enabled, при выключении возвращаем исходное значение.
+-- 2) Функция проверки выстрела (v519) отказывает, пока true локальные флаги спринта/бега
+--    (upvalue v90 и v91). Находим её по константам и каждый кадр сбрасываем эти флаги в false.
 ------------------------------------------------------------------
-local ffOrig  = setmetatable({}, { __mode = "k" }) -- FireSlowDown table -> исходный Enabled
-local ffConns = {}
+local ffOrig   = setmetatable({}, { __mode = "k" }) -- FireSlowDown table -> исходный Enabled
+local ffChecks = setmetatable({}, { __mode = "k" }) -- функция проверки -> { индексы bool-upvalue }
+local ffConns  = {}
+local ffLoop   = nil
 local ffBusy, ffQueued = false, false
+
+local FF_CONSTS = { "CheckIfFlinching", "RagdollCheck", "_USAGEDISABLED", "Right Arm" }
+
+local function ffIsCheckFunc(consts)
+    local found = 0
+    for _, want in ipairs(FF_CONSTS) do
+        for _, c in ipairs(consts) do
+            if c == want then found += 1; break end
+        end
+    end
+    return found == #FF_CONSTS
+end
 
 local function ffApply()
     for t, orig in pairs(ffOrig) do
@@ -315,10 +331,25 @@ local function ffScan()
     ffBusy = true
     pcall(function()
         for _, v in ipairs(getgc(true)) do
-            if type(v) == "table" and not (isreadonly and isreadonly(v)) then
-                local fsd = rawget(v, "FireSlowDown")
-                if type(fsd) == "table" and rawget(fsd, "Amount") ~= nil and ffOrig[fsd] == nil then
-                    ffOrig[fsd] = rawget(fsd, "Enabled") == true
+            local kind = type(v)
+            if kind == "table" then
+                if not (isreadonly and isreadonly(v)) then
+                    local fsd = rawget(v, "FireSlowDown")
+                    if type(fsd) == "table" and rawget(fsd, "Amount") ~= nil and ffOrig[fsd] == nil then
+                        ffOrig[fsd] = rawget(fsd, "Enabled") == true
+                    end
+                end
+            elseif kind == "function" and islclosure and islclosure(v) and not ffChecks[v] then
+                local ok, consts = pcall(debug.getconstants, v)
+                if ok and type(consts) == "table" and ffIsCheckFunc(consts) then
+                    local okU, ups = pcall(debug.getupvalues, v)
+                    if okU and type(ups) == "table" then
+                        local idxs = {}
+                        for i, up in pairs(ups) do
+                            if type(up) == "boolean" then idxs[#idxs + 1] = i end
+                        end
+                        if #idxs > 0 then ffChecks[v] = idxs end
+                    end
                 end
             end
         end
@@ -330,6 +361,18 @@ end
 local function ffRestore()
     for t, orig in pairs(ffOrig) do
         pcall(rawset, t, "Enabled", orig)
+    end
+end
+
+local function ffSprintStep()
+    if not M.ForceFire.Sprint then return end
+    for fn, idxs in pairs(ffChecks) do
+        for _, i in ipairs(idxs) do
+            local ok, val = pcall(debug.getupvalue, fn, i)
+            if ok and val == true then
+                pcall(debug.setupvalue, fn, i, false)
+            end
+        end
     end
 end
 
@@ -345,6 +388,7 @@ end
 local function ffDisconnect()
     for _, c in ipairs(ffConns) do c:Disconnect() end
     ffConns = {}
+    if ffLoop then ffLoop:Disconnect(); ffLoop = nil end
 end
 
 local function ffHook()
@@ -372,6 +416,7 @@ local function ffHook()
         hookChar(char)
         ffQueueScan(0.5)
     end)
+    ffLoop = RunService.RenderStepped:Connect(ffSprintStep)
 end
 
 function M.SetForceFire(state)
