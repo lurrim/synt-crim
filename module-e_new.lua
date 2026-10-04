@@ -42,6 +42,10 @@ local ESP = {
             Animate = true,
             RotationSpeed = 300,
             BlackOutline = true, -- чёрный внешний оутлайн
+            Shrink = 1,          -- на сколько студов уменьшить обычный бокс
+            Dynamic = true,      -- бокс меняет форму от ориентации персонажа
+            DynSize = Vector3.new(2.8, 4.8, 1.6),   -- размер 3D-ящика вокруг персонажа (ширина, высота, глубина)
+            DynOffset = Vector3.new(0, -0.5, 0),    -- сдвиг ящика относительно HRP
             Gradient = false, GradientRGB1 = Color3.fromRGB(119, 120, 255), GradientRGB2 = Color3.fromRGB(0, 0, 0),
             GradientFill = true, GradientFillRGB1 = Color3.fromRGB(119, 120, 255), GradientFillRGB2 = Color3.fromRGB(0, 0, 0),
             Filled = { Enabled = true, Transparency = 0.75 },
@@ -92,6 +96,31 @@ local function new(class, props)
     local inst = Instance.new(class)
     for k, v in pairs(props) do inst[k] = v end
     return inst
+end
+
+------------------------------------------------------------------
+-- Динамический бокс: проецируем 8 углов ящика вокруг HRP на экран
+-- и берём границы. Возвращает left, top, w, h или nil (угол за камерой).
+------------------------------------------------------------------
+local function dynamicBox(cam, hrp, size, offset)
+    local cf = hrp.CFrame * CFrame.new(offset)
+    local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
+    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+
+    for ix = -1, 1, 2 do
+        for iy = -1, 1, 2 do
+            for iz = -1, 1, 2 do
+                local p = cam:WorldToScreenPoint(cf:PointToWorldSpace(Vector3.new(hx * ix, hy * iy, hz * iz)))
+                if p.Z <= 0 then return nil end
+                if p.X < minX then minX = p.X end
+                if p.X > maxX then maxX = p.X end
+                if p.Y < minY then minY = p.Y end
+                if p.Y > maxY then maxY = p.Y end
+            end
+        end
+    end
+
+    return minX, minY, max(maxX - minX, 6), max(maxY - minY, 8)
 end
 
 ------------------------------------------------------------------
@@ -258,10 +287,23 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow, dt)
     end
 
     local D = ESP.Drawing
+    local B = D.Boxes
     local X, Y = pos.X, pos.Y
-    local scale = (hrp.Size.Y * vpY) / (pos.Z * 2)
-    local w, h = 3 * scale, 4.5 * scale
-    local left, top = X - w / 2, Y - h / 2
+    local left, top, w, h
+
+    -- динамический бокс по проекции 3D-ящика, иначе обычный (уменьшенный на Shrink студов)
+    if B.Dynamic then
+        left, top, w, h = dynamicBox(cam, hrp, B.DynSize, B.DynOffset)
+        if left then
+            X, Y = left + w / 2, top + h / 2
+        end
+    end
+    if not left then
+        local scale = (hrp.Size.Y * vpY) / (pos.Z * 2)
+        local shrink = B.Shrink or 0
+        w, h = max(3 - shrink, 0.5) * scale, max(4.5 - shrink, 0.5) * scale
+        left, top = X - w / 2, Y - h / 2
+    end
 
     local fade = 0
     if ESP.FadeOut.OnDistance then
@@ -294,7 +336,6 @@ local function update(plr, e, camPos, cam, vpY, rot, tickNow, dt)
 
     -- Box: белый оутлайн + чёрный снаружи
     do
-        local B = D.Boxes
         local box = e.Box
         local show = B.Full.Enabled
 
