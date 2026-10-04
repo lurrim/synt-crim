@@ -1,5 +1,5 @@
 -- module-camera.lua
--- Extended zoom + Smooth FOV (unoverridable) + No camera bobbing + Instant equip.
+-- Extended zoom + Smooth FOV (unoverridable) + No camera bobbing + Instant equip + Force fire.
 -- Без UI, всё управляется через getgenv().CameraMod
 
 if getgenv().CameraMod then
@@ -18,6 +18,7 @@ local M = {
     SmoothFOV = { Enabled = false, Value = 90, Speed = 8, PauseOnAim = false },
     NoBob     = { Enabled = false },
     Equip     = { Enabled = false, AnimSpeed = 50 }, -- AnimSpeed не ставить в 0 (EquipM делит на него)
+    ForceFire = { Enabled = false },
 }
 
 local function isAiming()
@@ -292,11 +293,105 @@ function M.SetInstantEquip(state)
 end
 
 ------------------------------------------------------------------
+-- Force fire (стрельба без замедления)
+-- GunClient после каждого выстрела читает config.FireSlowDown и, если Enabled = true,
+-- вешает замедление AffectChar("SD", Time, ..., Amount). Находим эти таблицы через getgc
+-- и выключаем Enabled, при выключении возвращаем исходное значение.
+------------------------------------------------------------------
+local ffOrig  = setmetatable({}, { __mode = "k" }) -- FireSlowDown table -> исходный Enabled
+local ffConns = {}
+local ffBusy, ffQueued = false, false
+
+local function ffApply()
+    for t, orig in pairs(ffOrig) do
+        if orig then
+            pcall(rawset, t, "Enabled", false)
+        end
+    end
+end
+
+local function ffScan()
+    if not getgc or ffBusy then return end
+    ffBusy = true
+    pcall(function()
+        for _, v in ipairs(getgc(true)) do
+            if type(v) == "table" and not (isreadonly and isreadonly(v)) then
+                local fsd = rawget(v, "FireSlowDown")
+                if type(fsd) == "table" and rawget(fsd, "Amount") ~= nil and ffOrig[fsd] == nil then
+                    ffOrig[fsd] = rawget(fsd, "Enabled") == true
+                end
+            end
+        end
+    end)
+    if M.ForceFire.Enabled then ffApply() end
+    ffBusy = false
+end
+
+local function ffRestore()
+    for t, orig in pairs(ffOrig) do
+        pcall(rawset, t, "Enabled", orig)
+    end
+end
+
+local function ffQueueScan(delay)
+    if ffQueued or not M.ForceFire.Enabled then return end
+    ffQueued = true
+    task.delay(delay or 0.4, function()
+        ffQueued = false
+        if M.ForceFire.Enabled then ffScan() end
+    end)
+end
+
+local function ffDisconnect()
+    for _, c in ipairs(ffConns) do c:Disconnect() end
+    ffConns = {}
+end
+
+local function ffHook()
+    ffDisconnect()
+    local function hookBackpack()
+        local bp = LP:FindFirstChildOfClass("Backpack")
+        if bp then
+            ffConns[#ffConns + 1] = bp.ChildAdded:Connect(function(ch)
+                if ch:IsA("Tool") then ffQueueScan(0.5) end
+            end)
+        end
+    end
+    local function hookChar(char)
+        if not char then return end
+        ffConns[#ffConns + 1] = char.ChildAdded:Connect(function(ch)
+            if ch:IsA("Tool") then ffQueueScan(0.05) end
+        end)
+    end
+    hookBackpack()
+    hookChar(LP.Character)
+    ffConns[#ffConns + 1] = LP.CharacterAdded:Connect(function(char)
+        task.wait(1)
+        if not M.ForceFire.Enabled then return end
+        hookBackpack()
+        hookChar(char)
+        ffQueueScan(0.5)
+    end)
+end
+
+function M.SetForceFire(state)
+    M.ForceFire.Enabled = state
+    if state then
+        ffScan()
+        ffHook()
+    else
+        ffDisconnect()
+        ffRestore()
+    end
+end
+
+------------------------------------------------------------------
 function M.Unload()
     M.SetZoom(false)
     M.SetSmoothFOV(false)
     M.SetNoBob(false)
     M.SetInstantEquip(false)
+    M.SetForceFire(false)
     getgenv().CameraMod = nil
 end
 
