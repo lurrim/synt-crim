@@ -294,68 +294,34 @@ end
 
 ------------------------------------------------------------------
 -- Force fire (стрельба без замедления и в спринте)
--- 1) GunClient после каждого выстрела читает config.FireSlowDown и, если Enabled = true,
---    вешает замедление AffectChar("SD", Time, ..., Amount). Находим эти таблицы через getgc
---    и выключаем Enabled, при выключении возвращаем исходное значение.
--- 2) Функция проверки выстрела (v519) отказывает, пока true локальные флаги спринта/бега
---    (upvalue v90 и v91). Находим её по константам и каждый кадр сбрасываем эти флаги в false.
+-- 1) Конфиг оружия: FireSlowDown.Enabled = false (замедление после выстрела).
+-- 2) Функция проверки выстрела в GunClient отказывает, пока true её bool-upvalue
+--    (спринт/переход бег-idle). Находим по константам (как No Stun) и держим их false.
+-- Скан идёт кусками с task.wait(), чтобы не фризить игру.
 ------------------------------------------------------------------
 local ffOrig   = setmetatable({}, { __mode = "k" }) -- FireSlowDown table -> исходный Enabled
-local ffChecks = setmetatable({}, { __mode = "k" }) -- функция проверки -> { индексы bool-upvalue }
+local ffChecks = {}                                 -- { {fn, idx}, ... }
 local ffConns  = {}
 local ffLoop   = nil
 local ffBusy, ffQueued = false, false
+local ffAcc = 0
 
 local FF_CONSTS = { "CheckIfFlinching", "RagdollCheck", "_USAGEDISABLED", "Right Arm" }
 
 local function ffIsCheckFunc(consts)
-    local found = 0
+    local hit = 0
     for _, want in ipairs(FF_CONSTS) do
         for _, c in ipairs(consts) do
-            if c == want then found += 1; break end
+            if c == want then hit += 1; break end
         end
     end
-    return found == #FF_CONSTS
+    return hit == #FF_CONSTS
 end
 
 local function ffApply()
     for t, orig in pairs(ffOrig) do
-        if orig then
-            pcall(rawset, t, "Enabled", false)
-        end
+        if orig then pcall(rawset, t, "Enabled", false) end
     end
-end
-
-local function ffScan()
-    if not getgc or ffBusy then return end
-    ffBusy = true
-    pcall(function()
-        for _, v in ipairs(getgc(true)) do
-            local kind = type(v)
-            if kind == "table" then
-                if not (isreadonly and isreadonly(v)) then
-                    local fsd = rawget(v, "FireSlowDown")
-                    if type(fsd) == "table" and rawget(fsd, "Amount") ~= nil and ffOrig[fsd] == nil then
-                        ffOrig[fsd] = rawget(fsd, "Enabled") == true
-                    end
-                end
-            elseif kind == "function" and islclosure and islclosure(v) and not ffChecks[v] then
-                local ok, consts = pcall(debug.getconstants, v)
-                if ok and type(consts) == "table" and ffIsCheckFunc(consts) then
-                    local okU, ups = pcall(debug.getupvalues, v)
-                    if okU and type(ups) == "table" then
-                        local idxs = {}
-                        for i, up in pairs(ups) do
-                            if type(up) == "boolean" then idxs[#idxs + 1] = i end
-                        end
-                        if #idxs > 0 then ffChecks[v] = idxs end
-                    end
-                end
-            end
-        end
-    end)
-    if M.ForceFire.Enabled then ffApply() end
-    ffBusy = false
 end
 
 local function ffRestore()
@@ -364,25 +330,69 @@ local function ffRestore()
     end
 end
 
-local function ffSprintStep()
-    if not M.ForceFire.Sprint then return end
-    for fn, idxs in pairs(ffChecks) do
-        for _, i in ipairs(idxs) do
-            local ok, val = pcall(debug.getupvalue, fn, i)
-            if ok and val == true then
-                pcall(debug.setupvalue, fn, i, false)
+local function ffScan()
+    if not getgc or ffBusy then return end
+    ffBusy = true
+    task.spawn(function()
+        local found = {}
+        pcall(function()
+            local gc = getgc(true)
+            for i = 1, #gc do
+                local v = gc[i]
+                local kind = type(v)
+                if kind == "table" then
+                    if not (isreadonly and isreadonly(v)) then
+                        local fsd = rawget(v, "FireSlowDown")
+                        if type(fsd) == "table" and rawget(fsd, "Amount") ~= nil and ffOrig[fsd] == nil then
+                            ffOrig[fsd] = rawget(fsd, "Enabled") == true
+                        end
+                    end
+                elseif kind == "function" and islclosure(v) then
+                    local ok, consts = pcall(debug.getconstants, v)
+                    if ok and type(consts) == "table" and ffIsCheckFunc(consts) then
+                        local okU, ups = pcall(debug.getupvalues, v)
+                        if okU and type(ups) == "table" then
+                            for idx, up in pairs(ups) do
+                                if type(up) == "boolean" then found[#found + 1] = { v, idx } end
+                            end
+                        end
+                    end
+                end
+                if i % 1500 == 0 then
+                    task.wait()
+                    if not M.ForceFire.Enabled then return end
+                end
             end
+        end)
+        if M.ForceFire.Enabled then
+            ffChecks = found
+            ffApply()
         end
-    end
+        ffBusy = false
+    end)
 end
 
 local function ffQueueScan(delay)
     if ffQueued or not M.ForceFire.Enabled then return end
     ffQueued = true
-    task.delay(delay or 0.4, function()
+    task.delay(delay or 1, function()
         ffQueued = false
         if M.ForceFire.Enabled then ffScan() end
     end)
+end
+
+local function ffStep(dt)
+    if not M.ForceFire.Sprint then return end
+    ffAcc += dt
+    if ffAcc < 0.03 then return end
+    ffAcc = 0
+    for i = 1, #ffChecks do
+        local e = ffChecks[i]
+        local ok, val = pcall(debug.getupvalue, e[1], e[2])
+        if ok and val == true then
+            pcall(debug.setupvalue, e[1], e[2], false)
+        end
+    end
 end
 
 local function ffDisconnect()
@@ -397,36 +407,31 @@ local function ffHook()
         local bp = LP:FindFirstChildOfClass("Backpack")
         if bp then
             ffConns[#ffConns + 1] = bp.ChildAdded:Connect(function(ch)
-                if ch:IsA("Tool") then ffQueueScan(0.5) end
+                if ch:IsA("Tool") then ffQueueScan(1) end
             end)
         end
     end
-    local function hookChar(char)
-        if not char then return end
-        ffConns[#ffConns + 1] = char.ChildAdded:Connect(function(ch)
-            if ch:IsA("Tool") then ffQueueScan(0.05) end
-        end)
-    end
+    -- в руки оружие берётся из рюкзака, замыкание проверки уже существует,
+    -- поэтому при экипировке повторный скан не нужен (это и фризило)
     hookBackpack()
-    hookChar(LP.Character)
-    ffConns[#ffConns + 1] = LP.CharacterAdded:Connect(function(char)
-        task.wait(1)
+    ffConns[#ffConns + 1] = LP.CharacterAdded:Connect(function()
+        task.wait(1.5)
         if not M.ForceFire.Enabled then return end
         hookBackpack()
-        hookChar(char)
-        ffQueueScan(0.5)
+        ffQueueScan(1)
     end)
-    ffLoop = RunService.RenderStepped:Connect(ffSprintStep)
+    ffLoop = RunService.Heartbeat:Connect(ffStep)
 end
 
 function M.SetForceFire(state)
     M.ForceFire.Enabled = state
     if state then
-        ffScan()
         ffHook()
+        ffScan()
     else
         ffDisconnect()
         ffRestore()
+        ffChecks = {}
     end
 end
 
