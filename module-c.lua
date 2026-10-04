@@ -381,6 +381,8 @@ local function ffQueueScan(delay)
     end)
 end
 
+-- getupvalue у разных экзекуторов возвращает то значение, то (имя, значение),
+-- поэтому значение не читаем, а просто пишем false
 local function ffStep(dt)
     if not M.ForceFire.Sprint then return end
     ffAcc += dt
@@ -388,10 +390,7 @@ local function ffStep(dt)
     ffAcc = 0
     for i = 1, #ffChecks do
         local e = ffChecks[i]
-        local ok, val = pcall(debug.getupvalue, e[1], e[2])
-        if ok and val == true then
-            pcall(debug.setupvalue, e[1], e[2], false)
-        end
+        pcall(debug.setupvalue, e[1], e[2], false)
     end
 end
 
@@ -411,13 +410,19 @@ local function ffHook()
             end)
         end
     end
-    -- в руки оружие берётся из рюкзака, замыкание проверки уже существует,
-    -- поэтому при экипировке повторный скан не нужен (это и фризило)
+    local function hookChar(char)
+        if not char then return end
+        ffConns[#ffConns + 1] = char.ChildAdded:Connect(function(ch)
+            if ch:IsA("Tool") then ffQueueScan(1) end
+        end)
+    end
     hookBackpack()
-    ffConns[#ffConns + 1] = LP.CharacterAdded:Connect(function()
+    hookChar(LP.Character)
+    ffConns[#ffConns + 1] = LP.CharacterAdded:Connect(function(char)
         task.wait(1.5)
         if not M.ForceFire.Enabled then return end
         hookBackpack()
+        hookChar(char)
         ffQueueScan(1)
     end)
     ffLoop = RunService.Heartbeat:Connect(ffStep)
